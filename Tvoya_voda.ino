@@ -16,37 +16,64 @@
 #define TIMEOUT 3
 #define RST 2
 #define BUFFLENGTH 256
+#define FLOW_SENSOR 2
+#define MOTOR 6
+#define WATER_VALVE 7
 
-SoftwareSerial GPSmodule(10, 11); // RX, TX
+volatile int  flow_frequency = 0;
+unsigned long currentTime = 0;
+unsigned long cloopTime = 0;
+unsigned int liters = 0;
+
+SoftwareSerial GSMmodule(10, 11); // RX, TX
 char serverResponse[BUFFLENGTH];  // Buffer for a server response 
-
 
 void setup()
 {
   /*SETUP COMMUNICATION*/
   Serial.begin(9600);       
-  GPSmodule.begin(9600);    
+  GSMmodule.begin(9600);    
   delay(2000);                    // Give time to GSM module logon to GSM network
-  Serial.println("GPSmodule ready...");
-  
-  GPSmodule_init();
+  Serial.println("GSMmodule ready...");
+  /*SETUP HARDWARE*/
+  Sensors_init();
+  Devices_init();
+  /*SETUP GSM*/
+  GSMmodule_init();
 }
 
 void loop()
 {
   //sendToServer("/Thingworx/Things/SmartLabIotT/Services/SmartLabIot/", "");
-  //task_list();
+  task_list();
   //task_update();
   //system_update();
-  system_error();
+  //system_error();
 }
 
-/*FIRST INIT*/
-void GPSmodule_init() 
+void Sensors_init()
+{
+  pinMode(FLOW_SENSOR, INPUT);
+  unsigned char flow_pin = digitalPinToInterrupt(FLOW_SENSOR);
+  attachInterrupt(flow_pin, flow, RISING);
+  sei();
+  currentTime = millis();
+  cloopTime = currentTime;
+}
+
+void Devices_init()
+{
+  pinMode(MOTOR, OUTPUT);
+  pinMode(WATER_VALVE, OUTPUT);
+  digitalWrite(MOTOR, LOW);
+  digitalWrite(WATER_VALVE, LOW);  
+}
+
+void GSMmodule_init() 
 {
   /*PINCODE ENTERING*/  
   Serial.println("Entering pincode");
-  GPSmodule.write("AT+CPIN=0301\r");
+  GSMmodule.write("AT+CPIN=0301\r");
   if (A7waitFor("OK", "yy", 10000) == OK)
     Serial.println("pincode accepted");
   else
@@ -77,143 +104,11 @@ void GPSmodule_init()
   Serial.println();
 }
 
-/*Function for reading of input stream from GSM module*/
-String A7read() {
-  String reply = "";
-  while(GPSmodule.available())  {
-    reply = GPSmodule.readString();
-  }
-  return reply;
-}
-
-
-/*Function for reading of HTTP response from server*/
-byte A7readResponse() {
-  char c;
-  byte startJSON = 0;
-  char response_status[3];  // for example 200, 400 or 404
-  bool response_flag = false;
-  int server_status = 0;
-  char http_word[9] = {'H', 'T', 'T', 'P', '/', '1', '.', '1', ' '};
-  int i = 0;
-  int j = 0;
-  int k = 0;
-  
-  while(GPSmodule.available())  
-  {
-    c = char(GPSmodule.read());
-    
-    /*CHECKING RESPONSE STATUS FROM SERVER*/
-    if (c == http_word[j] && startJSON == 0)
-    {
-      j++;
-      if (j == sizeof(http_word)/sizeof(http_word[0])){ // It's place to catch response status from server (HTTP/1.1 ...)
-        j = 0;
-        response_flag = true;
-      }
-      continue;
-    }
-    else j = 0;
- 
-    if (response_flag)
-    {
-      response_status[k] = c;
-      k++;
-      if (k == 3){
-        response_flag = false;  // status has been recieved
-        server_status = atoi(response_status);
-        Serial.print("SERVER RESPONSE -> ");
-        Serial.println(response_status);
-        delay(10);
-      }
-    }
-    /**************************************/
-    
-    /*SEARCHING FOR JSON MESSAGE IN SERVER RESPONSE*/
-    if (c == '{') 
-    {
-      startJSON++;
-    }
-    if (c == '}') 
-    {
-      startJSON--;
-      if (startJSON == 0)
-      {
-        serverResponse[i] = '}';
-        serverResponse[i+1] = '\0';
-        return OK;
-      }
-    }
-    if (startJSON)
-    {
-      serverResponse[i] = c;
-      i++;
-    }
-    /************************************************/
-    delay(1);
-  }
-  return NOTOK; // if we didn't catch JSON
-}
-
-/*Function which waiting for response from GSM module*/
-byte A7waitFor(String response1, String response2, int timeOut) {
-  unsigned long entry = millis();
-  int count = 0;
-  String reply;
-  byte retVal = 99;
-  do {
-    if (response1 == "HTTP/1.1")   // reading server request
-    {
-      if (A7readResponse() == OK){
-        return OK;  
-      }
-    }
-    else
-    {
-      reply = A7read();   // reading usual messages of GSM
-    }
-    if (reply != "") {
-      Serial.print((millis() - entry));
-      Serial.println(" ms ");
-      Serial.print("Reply: ");
-      Serial.println(reply);
-      Serial.println("****************");
-    }
-  } while ((reply.indexOf(response1) + reply.indexOf(response2) == -2) && millis() - entry < timeOut );
-  if ((millis() - entry) >= timeOut) {
-    retVal = TIMEOUT;
-  } else {
-    if (reply.indexOf(response1) + reply.indexOf(response2) > -2) retVal = OK;
-    else retVal = NOTOK;
-  }
-  return retVal;
-}
-
-/*Function which sends a command to GSM module*/
-byte A7command(String command, String response1, String response2, int timeOut, int repetitions) {
-  byte returnValue = NOTOK;
-  byte count = 0;
-  while (count < repetitions && returnValue != OK) 
-  {
-    GPSmodule.println(command);
-    Serial.print("Command: ");
-    Serial.println(command);
-    
-    if (A7waitFor(response1, response2, timeOut) == OK) {
-      returnValue = OK;
-    }
-    else { 
-      returnValue = NOTOK;
-    }
-    count++;
-  }
-  return returnValue;
-}
 
 /*Function for sending HTTP POST request to server*/
 void sendToServer(String post_dst, String post_body) 
 {
-  GPSmodule.flush();
+  GSMmodule.flush();
   char end_c[2];
   end_c[0] = 0x1a;
   end_c[1] = '\0';
@@ -228,26 +123,26 @@ void sendToServer(String post_dst, String post_body)
   /*POST request for transmitting*/
   A7command("AT+CIPSEND", ">", "yy", 10000, 1); 
   delay(500);
-  GPSmodule.print("POST ");
-  GPSmodule.print(post_dst);
-  GPSmodule.print("?appKey=");
-  GPSmodule.print(appKey);
-  GPSmodule.print("&method=post&x-thingworx-session=true");
-  GPSmodule.print("&temp=");
-  GPSmodule.print(666);
-  GPSmodule.print(" HTTP/1.1");
-  GPSmodule.print("\r\n");
-  GPSmodule.print("Accept: application/json");
-  GPSmodule.print("\r\n");
-  GPSmodule.print("HOST: ");
-  GPSmodule.print(host);
-  GPSmodule.print("\r\n");
-  GPSmodule.print("Content-Type: application/json");
-  GPSmodule.print("\r\n");
-  GPSmodule.print("Conection: closed");
-  GPSmodule.print("\r\n");
-  GPSmodule.print("\r\n");
-  GPSmodule.print(post_body);
+  GSMmodule.print("POST ");
+  GSMmodule.print(post_dst);
+  GSMmodule.print("?appKey=");
+  GSMmodule.print(appKey);
+  GSMmodule.print("&method=post&x-thingworx-session=true");
+  GSMmodule.print("&temp=");
+  GSMmodule.print(666);
+  GSMmodule.print(" HTTP/1.1");
+  GSMmodule.print("\r\n");
+  GSMmodule.print("Accept: application/json");
+  GSMmodule.print("\r\n");
+  GSMmodule.print("HOST: ");
+  GSMmodule.print(host);
+  GSMmodule.print("\r\n");
+  GSMmodule.print("Content-Type: application/json");
+  GSMmodule.print("\r\n");
+  GSMmodule.print("Conection: closed");
+  GSMmodule.print("\r\n");
+  GSMmodule.print("\r\n");
+  GSMmodule.print(post_body);
 
   Serial.print("POST /Thingworx/Things/SmartLabIotT/Services/SmartLabIot/");
   Serial.print("?appKey=");
@@ -287,8 +182,21 @@ void sendToServer(String post_dst, String post_body)
 String getTime()
 {
   String reply;
-  GPSmodule.println("AT+CCLK?");
+  GSMmodule.println("AT+CCLK?");
   reply = A7read();
+}
+
+void startPour(int amount)
+{
+  /*Checking current amount of poured water*/
+  while (liters < amount){
+    /*Open water valve and start motor*/
+    digitalWrite(WATER_VALVE, HIGH); 
+    digitalWrite(MOTOR, HIGH);
+  }
+  /*Close water valve and off motor*/
+  digitalWrite(WATER_VALVE, LOW); 
+  digitalWrite(MOTOR, LOW);
 }
 
 /*Function which parse Json response from server*/
@@ -301,9 +209,15 @@ void parseJsonResponse()
   switch(request_type)
   {
   case 1:
+    /*Check if there's no new task*/
+    if (root["task_water"] == "null"){
+      break;
+    }
+    /*Else we have a new task*/
     String id = root["task_water"]["id"];
     int amount = root["task_water"]["amount"];
     String sys_status = root["task_water"]["status"];
+    startPour(amount);
     Serial.println(id);
     Serial.println(amount);
     Serial.println(sys_status);
